@@ -1,0 +1,68 @@
+name: Bump herdr
+
+# Polls saitonakamura/herdr for a newer fork release and re-renders the formula.
+# Polling, not a dispatch from the fork, so no cross-repo token is needed.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag to render (default: the latest release)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-herdr
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Pick the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag=${INPUT_TAG:-$(gh api repos/saitonakamura/herdr/releases/latest --jq .tag_name)}
+          case "$tag" in
+            v*+fork.*) ;;
+            *) echo "error: $tag is not a fork release tag"; exit 1 ;;
+          esac
+          current=$(sed -n 's/^  version "\(.*\)"$/\1/p' Formula/herdr.rb)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "v$current" = "$tag" ] && [ -z "$INPUT_TAG" ]; then
+            echo "Formula already at $tag"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Render the formula
+        if: steps.release.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          gh release download "$TAG" -R saitonakamura/herdr -p SHA256SUMS -D "$RUNNER_TEMP"
+          scripts/render-formula "$TAG" "$RUNNER_TEMP/SHA256SUMS" > Formula/herdr.rb.new
+          mv Formula/herdr.rb.new Formula/herdr.rb
+          git diff --stat
+
+      - name: Commit
+        if: steps.release.outputs.changed == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git diff --quiet && { echo "nothing to commit"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "herdr ${TAG#v}" -- Formula/herdr.rb
+          git push
